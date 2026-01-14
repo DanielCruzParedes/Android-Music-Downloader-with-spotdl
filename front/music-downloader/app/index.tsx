@@ -1,5 +1,5 @@
 import { View, Text, TextInput, Pressable, Alert } from "react-native";
-import { Directory, File, Paths } from "expo-file-system";
+import { Directory, File } from "expo-file-system";
 import { useState } from "react";
 
 export default function Index() {
@@ -9,85 +9,80 @@ export default function Index() {
   const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
   if (!BACKEND) {
     Alert.alert("Config error", "Backend URL is not set");
-    return;
+    return null;
   }
 
   const handleDownload = async () => {
     if (!url) {
-      Alert.alert("Error", "Please enter a URL");
+      Alert.alert("Error", "Please enter a Spotify URL");
       return;
     }
 
     try {
       setLoading(true);
-      console.log("Starting download for URL:", url);
 
-      // 1) Start the job
+      // 1) User chooses destination
+      const destination = await Directory.pickDirectoryAsync();
+      if (!destination) {
+        Alert.alert("Error", "No destination selected");
+        return;
+      }
+
+      // 2) Start backend job
       const startRes = await fetch(
         `${BACKEND}/start_download?url=${encodeURIComponent(url)}`,
         { method: "POST" }
       );
-      console.log("Start response:", startRes);
-      if (!startRes.ok) {
-        const txt = await startRes.text();
-        throw new Error(txt || "Could not start download");
-      }
-      const { job_id } = await startRes.json();
-      console.log("Job started:", job_id);
 
-      // 2) Polling (every 2s) until ready or error occurs
-      let polling = true;
+      if (!startRes.ok) {
+        throw new Error(await startRes.text());
+      }
+
+      const { job_id } = await startRes.json();
+
+      // 3) Poll backend
       const pollInterval = 2000;
-      const maxPolls = 150; // about 5 minutes
+      const maxPolls = 150;
       let polls = 0;
 
-      while (polling && polls < maxPolls) {
+      while (polls < maxPolls) {
         polls++;
-        await new Promise((res) => setTimeout(res, pollInterval));
+        await new Promise((r) => setTimeout(r, pollInterval));
 
         const statusRes = await fetch(`${BACKEND}/status/${job_id}`);
         if (!statusRes.ok) {
-          const txt = await statusRes.text();
-          throw new Error(txt || "Error checking status");
+          throw new Error(await statusRes.text());
         }
-        const statusJson = await statusRes.json();
-        console.log("Status:", statusJson);
 
-        if (statusJson.status === "done") {
-          polling = false;
-          // 3) download file (quick request)
-          const destination = new Directory(Paths.document, "music");
-          if (!destination.exists) {
-            await destination.create({ intermediates: true });
-          }
+        const status = await statusRes.json();
 
-          const output = await File.downloadFileAsync(
+        if (status.status === "done") {
+          // 4) Download directly into selected folder
+          const file = await File.downloadFileAsync(
             `${BACKEND}/file/${job_id}`,
-            destination
+            destination,
+            { idempotent: true }
           );
 
-          console.log("Saved to:", output.uri);
+          console.log("Saved to:", file.uri);
           Alert.alert("Done", "Song downloaded successfully");
-          break;
-        } else if (statusJson.status === "error") {
-          polling = false;
-          throw new Error(statusJson.error || "Error downloading song");
-        } else {
-          // still pending/running -> continue
-          console.log("Still running...");
+          return;
+        }
+
+        if (status.status === "error") {
+          throw new Error(status.error || "Download failed");
         }
       }
 
-      if (polls >= maxPolls) {
-        throw new Error("Timeout in polling (took too long)");
-      }
-    } catch (err) {
+      throw new Error("Download timeout");
+    } catch (err: any) {
       console.error(err);
-      Alert.alert("Error", "Download failed");
+      Alert.alert("Error", err.message ?? "Download failed");
     } finally {
       setLoading(false);
     }
   };
+
   return (
     <View
       style={{
@@ -121,6 +116,7 @@ export default function Index() {
 
       <Pressable
         onPress={handleDownload}
+        disabled={loading}
         style={{
           marginTop: 20,
           backgroundColor: "#007AFF",
@@ -129,7 +125,6 @@ export default function Index() {
           borderRadius: 6,
           opacity: loading ? 0.6 : 1,
         }}
-        disabled={loading}
       >
         <Text style={{ color: "white", fontSize: 16 }}>
           {loading ? "Downloading..." : "Download"}
